@@ -205,3 +205,24 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# Python virtual env
+.venv/
+
+# Python cache
+__pycache__/
+*.pyc
+
+# OAuth tokens (created when you log in via browser)
+token.json
+
+# Env files / secrets if you use them
+.env
+
+# Any downloaded Google credential files
+credentials.json
+client_secret*.json
+
+# Editor configs (optional but nice)
+.vscode/
+.idea/
