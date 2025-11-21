@@ -1,8 +1,18 @@
 from __future__ import annotations
 
+"""
+Environment variables:
+  GOOGLE_CLIENT_ID      (required)
+  GOOGLE_CLIENT_SECRET  (required)
+  GOOGLE_PROJECT_ID     (required)
+  LLM_BASE_URL          (optional, default "http://127.0.0.1:11434")
+  LLM_MODEL             (optional, default "llama3.1")
+"""
+
 import os
 import os.path
 import json
+import argparse
 from typing import List, Dict, Any, Tuple
 from email.utils import parseaddr
 
@@ -12,33 +22,25 @@ from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 
-
 SCOPES = ["https://www.googleapis.com/auth/gmail.readonly"]
-
 
 ENV_CLIENT_ID = "GOOGLE_CLIENT_ID"
 ENV_CLIENT_SECRET = "GOOGLE_CLIENT_SECRET"
 ENV_PROJECT_ID = "GOOGLE_PROJECT_ID"
 
-
 ENV_LLM_BASE_URL = "LLM_BASE_URL"
 ENV_LLM_MODEL = "LLM_MODEL"
-
 
 LLM_BASE_URL = os.environ.get(ENV_LLM_BASE_URL, "http://127.0.0.1:11434")
 LLM_MODEL = os.environ.get(ENV_LLM_MODEL, "llama3.1")
 
 
-
 def get_gmail_service():
-    
     creds: Credentials | None = None
 
-    
     if os.path.exists("token.json"):
         creds = Credentials.from_authorized_user_file("token.json", SCOPES)
 
-    
     if not creds or not creds.valid:
         if creds and creds.expired and creds.refresh_token:
             creds.refresh(Request())
@@ -71,18 +73,14 @@ def get_gmail_service():
             flow = InstalledAppFlow.from_client_config(client_config, SCOPES)
             creds = flow.run_local_server(port=0)
 
-       
         with open("token.json", "w", encoding="utf-8") as token_file:
             token_file.write(creds.to_json())
 
     service = build("gmail", "v1", credentials=creds)
     return service
 
-def fetch_latest_messages(
-    service,
-    max_results: int = 5,
-) -> List[Dict[str, Any]]:
-    
+
+def fetch_latest_messages(service, max_results: int = 50) -> List[Dict[str, Any]]:
     result = (
         service.users()
         .messages()
@@ -93,7 +91,6 @@ def fetch_latest_messages(
     messages: List[Dict[str, Any]] = []
 
     for summary in message_summaries:
-        
         msg = (
             service.users()
             .messages()
@@ -108,8 +105,8 @@ def fetch_latest_messages(
 
     return messages
 
+
 def extract_email_info(msg: Dict[str, Any]) -> Dict[str, str]:
-    
     headers = msg.get("payload", {}).get("headers", [])
 
     def get_header(name: str) -> str:
@@ -139,7 +136,7 @@ def build_email_prompt(info: Dict[str, str]) -> str:
     prompt = f"""
 You are an assistant that classifies emails.
 
-Given the email details below, you must answer in **valid JSON only** with the keys:
+Given the email details below, you must answer in valid JSON only with the keys:
   - "category": one of ["Work","School","Shopping","Finance","Personal","Social","Spam","Other"]
   - "priority": one of ["Urgent","Important","Normal","Low"]
   - "requires_response": true or false
@@ -155,6 +152,7 @@ Email details:
 """
     return prompt.strip()
 
+
 def call_local_llm(prompt: str) -> Dict[str, Any]:
     base = LLM_BASE_URL.rstrip("/")
     url = f"{base}/api/chat"
@@ -162,16 +160,27 @@ def call_local_llm(prompt: str) -> Dict[str, Any]:
     payload = {
         "model": LLM_MODEL,
         "messages": [
-            {"role": "system", "content": "You are a precise JSON-only email classifier."},
+            {
+                "role": "system",
+                "content": "You are a precise JSON-only email classifier.",
+            },
             {"role": "user", "content": prompt},
         ],
         "stream": False,
     }
 
-    resp = requests.post(url, json=payload, timeout=300)
-    resp.raise_for_status()
-    data = resp.json()
+    try:
+        resp = requests.post(url, json=payload, timeout=300)
+        resp.raise_for_status()
+    except requests.exceptions.Timeout:
+        raise RuntimeError(
+            f"Timed out talking to LLM at {url}. "
+            f"Try 'ollama run {LLM_MODEL}' in a terminal first to warm up the model."
+        )
+    except requests.exceptions.RequestException as e:
+        raise RuntimeError(f"Error calling LLM at {url}: {e}") from e
 
+    data = resp.json()
     content = data.get("message", {}).get("content", "")
     content_str = (content or "").strip()
 
@@ -186,8 +195,7 @@ def call_local_llm(prompt: str) -> Dict[str, Any]:
         return {"raw_response": content_str}
 
 
-
-def analyze_emails(max_emails: int = 5):
+def analyze_emails(max_emails: int = 50):
     print(f"LLM_BASE_URL = {LLM_BASE_URL}")
     print(f"LLM_MODEL    = {LLM_MODEL}")
     print(f"Connecting to Gmail and fetching last {max_emails} emails...")
@@ -223,8 +231,24 @@ def analyze_emails(max_emails: int = 5):
         print(f"Needs reply? {requires_response}")
         print("-" * 80)
 
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Classify Gmail emails with a local LLM."
+    )
+    parser.add_argument(
+        "--max-emails",
+        type=int,
+        default=50,
+        help="Number of latest emails to analyze (default: 50)",
+    )
+    return parser.parse_args()
+
+
 def main():
-    analyze_emails(max_emails=5)
+    args = parse_args()
+    analyze_emails(max_emails=args.max_emails)
+
 
 if __name__ == "__main__":
     main()
