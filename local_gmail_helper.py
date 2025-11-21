@@ -13,6 +13,7 @@ import os
 import os.path
 import json
 import argparse
+import base64  # NEW
 from typing import List, Dict, Any, Tuple
 from email.utils import parseaddr
 
@@ -106,7 +107,63 @@ def fetch_latest_messages(service, max_results: int = 50) -> List[Dict[str, Any]
     return messages
 
 
-def extract_email_info(msg: Dict[str, Any]) -> Dict[str, str]:
+def extract_body_excerpt(payload: Dict[str, Any], max_chars: int = 400) -> str:
+    """
+    Extract a short text/plain excerpt from the email body.
+    Keeps it small so prompts stay efficient for the local LLM.
+    """
+    texts: List[str] = []
+
+    def decode_body(data: str) -> str:
+        if not data:
+            return ""
+        padding = 4 - (len(data) % 4)
+        if padding and padding != 4:
+            data += "=" * padding
+        try:
+            decoded_bytes = base64.urlsafe_b64decode(data)
+            return decoded_bytes.decode("utf-8", errors="replace")
+        except Exception:
+            return ""
+
+    def walk(part: Dict[str, Any]):
+        if len(" ".join(texts)) >= max_chars:
+            return
+
+        mime_type = part.get("mimeType", "")
+        body = part.get("body", {})
+
+        if mime_type.startswith("multipart/") and "parts" in part:
+            for sub in part["parts"]:
+                walk(sub)
+                if len(" ".join(texts)) >= max_chars:
+                    break
+        else:
+            if mime_type == "text/plain":
+                data = body.get("data")
+                if data:
+                    text = decode_body(data)
+                    if text.strip():
+                        texts.append(text)
+
+    if not payload:
+        return ""
+
+    walk(payload)
+
+    if not texts:
+        return ""
+
+    combined = " ".join(texts)
+    combined = " ".join(combined.split())
+
+    if len(combined) > max_chars:
+        combined = combined[:max_chars].rstrip() + "..."
+
+    return combined
+
+
+def extract_email_info(msg: Dict[str, Any], max_body_chars: int = 400) -> Dict[str, str]:
     headers = msg.get("payload", {}).get("headers", [])
 
     def get_header(name: str) -> str:
@@ -123,16 +180,24 @@ def extract_email_info(msg: Dict[str, Any]) -> Dict[str, str]:
     sender_name, sender_address = parseaddr(from_raw)
     _, to_address = parseaddr(to_raw)
 
+    
+    body_excerpt = extract_body_excerpt(msg.get("payload", {}), max_chars=max_body_chars)
+    if not body_excerpt:
+        body_excerpt = snippet or ""
+
     return {
         "sender_name": sender_name or sender_address or "(unknown)",
         "sender_address": sender_address or "(unknown)",
         "to_address": to_address or "(unknown)",
         "subject": subject or "(no subject)",
         "snippet": snippet or "",
+        "body_excerpt": body_excerpt,  # NEW
     }
 
 
 def build_email_prompt(info: Dict[str, str]) -> str:
+    body_excerpt = info.get("body_excerpt", "").strip()
+
     prompt = f"""
 You are an assistant that classifies emails.
 
@@ -150,6 +215,10 @@ Email details:
 - Subject: {info["subject"]}
 - Snippet: {info["snippet"]}
 """
+
+    if body_excerpt:
+        prompt += f"- Body excerpt (truncated): {body_excerpt}\n"
+
     return prompt.strip()
 
 
@@ -170,15 +239,17 @@ def call_local_llm(prompt: str) -> Dict[str, Any]:
     }
 
     try:
-        resp = requests.post(url, json=payload, timeout=300)
+        resp = requests.post(url, json=payload, timeout=(5, 120))
         resp.raise_for_status()
     except requests.exceptions.Timeout:
         raise RuntimeError(
-            f"Timed out talking to LLM at {url}. "
-            f"Try 'ollama run {LLM_MODEL}' in a terminal first to warm up the model."
+            f"Timed out talking to Ollama at {url}. "
+            f"Make sure the Ollama server is running and the model '{LLM_MODEL}' "
+            f"is loaded. Try running 'ollama run {LLM_MODEL}' in a terminal first "
+            f"and check that it responds quickly."
         )
     except requests.exceptions.RequestException as e:
-        raise RuntimeError(f"Error calling LLM at {url}: {e}") from e
+        raise RuntimeError(f"Error calling Ollama at {url}: {e}") from e
 
     data = resp.json()
     content = data.get("message", {}).get("content", "")
@@ -208,7 +279,7 @@ def analyze_emails(max_emails: int = 50):
     results: List[Tuple[Dict[str, str], Dict[str, Any]]] = []
 
     for i, msg in enumerate(messages, start=1):
-        info = extract_email_info(msg)
+        info = extract_email_info(msg, max_body_chars=400)  
         prompt = build_email_prompt(info)
 
         print(f"[{i}/{len(messages)}] Asking LLM about email: {info['subject']!r}")
