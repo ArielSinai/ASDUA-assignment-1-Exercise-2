@@ -23,6 +23,8 @@ from email.utils import parseaddr
 
 import requests
 import redis
+from collections import Counter
+import matplotlib.pyplot as plt
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
@@ -362,6 +364,12 @@ def analyze_emails(max_emails: int = 50):
         results.append((info, llm_result))
 
     print("\n=== Classification results ===\n")
+
+    categories: List[str] = []
+    requires_flags: List[bool] = []
+    sender_counts: Counter[str] = Counter()
+    sender_names: Dict[str, str] = {}
+
     for info, llm_result in results:
         category = llm_result.get("category", "Unknown")
         priority = llm_result.get("priority", "Unknown")
@@ -370,12 +378,58 @@ def analyze_emails(max_emails: int = 50):
             llm_result.get("requires_reply", False),
         )
 
+        categories.append(category)
+        requires_flags.append(bool(requires_response))
+
+        addr = info["sender_address"]
+        sender_counts[addr] += 1
+        if addr not in sender_names:
+            sender_names[addr] = info["sender_name"]
+
         print(f"Subject : {info['subject']}")
         print(f"From    : {info['sender_name']} <{info['sender_address']}>")
         print(f"Category: {category}")
         print(f"Priority: {priority}")
         print(f"Needs reply? {requires_response}")
         print("-" * 80)
+
+    print("\n=== Senders with more than one email ===\n")
+    multi_senders = {addr: count for addr, count in sender_counts.items() if count > 1}
+
+    if not multi_senders:
+        print("No sender appears more than once in this batch.")
+    else:
+        for addr, count in multi_senders.items():
+            name = sender_names.get(addr, "(unknown)")
+            print(f"{name} <{addr}>: {count} emails")
+
+    if results:
+        category_counts = Counter(categories)
+        response_counts = Counter(
+            ["Needs reply" if r else "No reply needed" for r in requires_flags]
+        )
+
+        plt.figure(figsize=(8, 6))
+        plt.title("Email Categories Distribution")
+        plt.pie(
+            list(category_counts.values()),
+            labels=list(category_counts.keys()),
+            autopct="%1.1f%%",
+            startangle=140,
+        )
+        plt.axis("equal")
+        plt.show()
+
+        plt.figure(figsize=(8, 6))
+        plt.title("Emails That Require a Response")
+        plt.pie(
+            list(response_counts.values()),
+            labels=list(response_counts.keys()),
+            autopct="%1.1f%%",
+            startangle=140,
+        )
+        plt.axis("equal")
+        plt.show()
 
 
 def parse_args() -> argparse.Namespace:
